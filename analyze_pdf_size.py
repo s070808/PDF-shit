@@ -1,6 +1,7 @@
 import PyPDF2
 import os
 import re
+import hashlib
 
 def extract_and_analyze(pdf_path):
     with open(pdf_path, 'rb') as file:
@@ -9,13 +10,13 @@ def extract_and_analyze(pdf_path):
         print(f"Total pages: {len(reader.pages)}")
         
         image_counter = 0
-        total_image_size = 0
-        image_details = []  # Store image info for summary
+        unique_images = {}  # Track unique images by hash
+        all_image_details = []  # Store all image occurrences
         
         for page_num, page in enumerate(reader.pages):
             print(f"\n=== Page {page_num + 1} ===")
             
-            # Get page dimensions (A4)
+            # Get page dimensions
             media_box = page['/MediaBox']
             page_width = float(media_box[2])
             page_height = float(media_box[3])
@@ -32,7 +33,6 @@ def extract_and_analyze(pdf_path):
                 content_str = content_data.decode('latin-1', errors='ignore')
                 
                 # Find XObject placements with regex
-                # Pattern: numbers followed by 'cm' then XObject name and 'Do'
                 pattern = r'([\d.\s-]+)\s+cm[^/]*/(\w+)\s+Do'
                 matches = re.findall(pattern, content_str)
                 
@@ -42,7 +42,6 @@ def extract_and_analyze(pdf_path):
                     if len(matrix_values) >= 6:
                         a, b, c, d, e, f = [float(v) for v in matrix_values[:6]]
                         
-                        # Store position for later use
                         xobj_positions[xobj_name] = {
                             'x': e,
                             'y': f,
@@ -90,7 +89,20 @@ def extract_and_analyze(pdf_path):
                                     height = form_obj['/Height']
                                     data = form_obj.get_data()
                                     size_kb = len(data) / 1024
-                                    total_image_size += size_kb
+                                    
+                                    # Calculate hash to identify unique images
+                                    image_hash = hashlib.md5(data).hexdigest()
+                                    
+                                    # Store unique image
+                                    if image_hash not in unique_images:
+                                        unique_images[image_hash] = {
+                                            'width': width,
+                                            'height': height,
+                                            'size_kb': size_kb,
+                                            'format': form_obj.get('/Filter', 'Unknown'),
+                                            'count': 0
+                                        }
+                                    unique_images[image_hash]['count'] += 1
                                     
                                     # Determine position description
                                     position_desc = "unknown position"
@@ -100,7 +112,6 @@ def extract_and_analyze(pdf_path):
                                         x_pos = pos['x']
                                         y_pos = pos['y']
                                         
-                                        # Determine quadrant
                                         is_right = x_pos > page_width / 2
                                         is_top = y_pos > page_height / 2
                                         
@@ -108,20 +119,22 @@ def extract_and_analyze(pdf_path):
                                         v_pos = "top" if is_top else "bottom"
                                         position_desc = f"{v_pos}-{h_pos}"
                                     
-                                    # Store image details
-                                    image_details.append({
+                                    # Store occurrence details
+                                    all_image_details.append({
+                                        'page': page_num + 1,
                                         'width': width,
                                         'height': height,
                                         'size_kb': size_kb,
                                         'position': position_desc,
-                                        'format': form_obj.get('/Filter', 'Unknown')
+                                        'format': form_obj.get('/Filter', 'Unknown'),
+                                        'hash': image_hash
                                     })
                                     
                                     print(f"  Contains Image: {form_obj_name}")
                                     print(f"    Pixel Dimensions: {width}x{height} px")
                                     print(f"    File Size: {size_kb:.2f} KB")
                                     
-                                    # Extract - use a safe filename
+                                    # Extract
                                     output_filename = f"extracted_image_{image_counter}.jpg"
                                     with open(output_filename, 'wb') as img_file:
                                         img_file.write(data)
@@ -131,10 +144,15 @@ def extract_and_analyze(pdf_path):
     total_size = os.path.getsize(pdf_path) / 1024
     print(f"\n=== SUMMARY ===")
     print(f"Total PDF size: {total_size:.2f} KB")
-    print(f"Total raster images: {image_counter}")
+    print(f"Total image occurrences: {image_counter}")
+    print(f"Unique images: {len(unique_images)}")
     
-    # Print image details dynamically
-    for i, img in enumerate(image_details, 1):
+    # Calculate actual image storage size
+    actual_image_size = sum(img['size_kb'] for img in unique_images.values())
+    
+    # Print unique image details
+    print(f"\n=== Unique Images ===")
+    for i, (hash_val, img) in enumerate(unique_images.items(), 1):
         filter_name = img['format']
         if filter_name == '/DCTDecode':
             format_str = 'JPG'
@@ -143,18 +161,23 @@ def extract_and_analyze(pdf_path):
         else:
             format_str = str(filter_name).strip('/')
         
-        print(f"\nImage {i}: {img['width']}x{img['height']}px {format_str}, {img['size_kb']:.2f} KB")
-        print(f"  Position: {img['position']}")
+        print(f"\nUnique Image {i}: {img['width']}x{img['height']}px {format_str}, {img['size_kb']:.2f} KB")
+        print(f"  Used on {img['count']} page(s)")
         print(f"  Percentage of PDF: {(img['size_kb']/total_size)*100:.1f}%")
     
-    print(f"\nTotal image size: {total_image_size:.2f} KB ({(total_image_size/total_size)*100:.1f}%)")
-    print(f"Other content (text, fonts, vectors): {total_size - total_image_size:.2f} KB ({((total_size - total_image_size)/total_size)*100:.1f}%)")
+    print(f"\n=== Storage Breakdown ===")
+    print(f"Total unique image size: {actual_image_size:.2f} KB ({(actual_image_size/total_size)*100:.1f}%)")
+    print(f"Other content (text, fonts, vectors, structure): {total_size - actual_image_size:.2f} KB ({((total_size - actual_image_size)/total_size)*100:.1f}%)")
     
-    print(f"\nTo reduce file size:")
-    print(f"  1. Optimize JPG images (reduce dimensions or increase compression)")
-    print(f"  2. Consider simplifying vector graphics if possible")
-    print(f"  3. Ensure fonts are subset (only include used characters)")
+    print(f"\n=== Recommendations ===")
+    if len(unique_images) > 0:
+        largest_img = max(unique_images.values(), key=lambda x: x['size_kb'])
+        if largest_img['size_kb'] > 50:
+            print(f"  • Largest image is {largest_img['width']}x{largest_img['height']}px ({largest_img['size_kb']:.2f} KB)")
+            print(f"    Consider reducing resolution or increasing compression")
+    print(f"  • Ensure fonts are subset (only include used characters)")
+    print(f"  • Consider simplifying vector graphics if possible")
 
 if __name__ == "__main__":
-    pdf_path = r"C:\Users\MM-Vision 08-2021\Downloads\Dette er et testbrev.pdf"
+    pdf_path = r"C:\Users\MM-Vision 08-2021\Downloads\biulfos.pdf"
     extract_and_analyze(pdf_path)
